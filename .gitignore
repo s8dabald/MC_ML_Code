@@ -1,3 +1,7 @@
 /bot_utils.py
 /mc_ml.venv
 /start.bat
+/__pycache__/
+/tb_logs/
+/checkpoints/
+/ppo_minecraft_final.zip

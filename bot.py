@@ -1,202 +1,203 @@
 import time
-from javascript import require
-from mcrcon import MCRcon
 import numpy as np
+from javascript import require
+from config import (
+    SERVER_HOST, SERVER_PORT, MAX_ENTITIES, STATE_SIZE, BLOCK_RADIUS,
+)
 
-mineflayer = require('mineflayer')
-Vec3 = require('vec3')
+mineflayer = require("mineflayer")
+Vec3 = require("vec3")
+HELPERS = require("./env_helpers.js")
 
-# --- CONFIG ---
-SERVER_HOST = "127.0.0.1"
-SERVER_PORT = 25565
-RCON_PORT = 25575
-RCON_PASSWORD = "banana1"
-
-bot_ready = False
+# --- GLOBAL STATE ---
+bot = None
 mcData = None
+bot_ready = False
+dead = False
+disconnected = False
+kick_reason = None
+disconnect_reason = None
 
-# --- PERSISTENT RCON CLIENT ---
 
-class PersistentRCON:
-    def __init__(self, host, password, port):
-        self.host = host
-        self.password = password
-        self.port = port
-        self.mcr = None
+def create_bot(host=SERVER_HOST, port=SERVER_PORT):
+    """Bot erstellen und Event-Handler registrieren."""
+    global bot, mcData, bot_ready, dead, disconnected, kick_reason, disconnect_reason
 
-    def connect(self):
-        try:
-            self.mcr = MCRcon(self.host, self.password, port=self.port)
-            self.mcr.connect()
-            print("-> RCON Verbindung dauerhaft aufgebaut.")
-        except Exception as e:
-            print(f"[RCON Fehler beim Connect]: {e}")
+    print("Erstelle Mineflayer-Bot...")
+    bot = mineflayer.createBot({
+        "host": host,
+        "port": port,
+        "username": "bananagod",
+        "auth": "offline",
+        "version": False,
+        # Client-Keepalive-Timeout erhoehen: Default 30s beendet die Verbindung
+        # ("socketClosed"/"keepAliveError"), wenn der Server mal kurz rueckelt.
+        # Bei Free-Running 20TPS sollte der Server normal antworten, aber bei
+        # einem Spike (z.B. Weltgen, Mobs) darf der Client nicht sofort gezwungen
+        # werden. 5 Minuten Puffer.
+        "checkTimeoutInterval": 5 * 60 * 1000,
+    })
 
-    def send(self, command):
-        if self.mcr:
-            try:
-                return self.mcr.command(command)
-            except Exception as e:
-                print(f"[RCON Sende-Fehler]: {e}")
-        return None
+    def handle_spawn(*args):
+        global mcData, bot_ready, disconnected, kick_reason, disconnect_reason
+        print("-> Bot ist gespannt!")
+        # Neuer Spawn = neue Verbindung -> DC-Flags zuruecksetzen
+        disconnected = False
+        kick_reason = None
+        disconnect_reason = None
+        if mcData is None:
+            mcData = require("minecraft-data")(bot.version)
+            print(f"-> minecraft-data geladen fuer Version: {bot.version}")
+        bot_ready = True
 
-    def close(self):
-        if self.mcr:
-            try:
-                self.mcr.disconnect()
-                print("-> RCON Verbindung sauber geschlossen.")
-            except Exception as e:
-                print(f"[RCON Fehler beim Schließen]: {e}")
+    def handle_death(*args):
+        global bot_ready, dead
+        bot_ready = False
+        dead = True
+        print("-> BOT IST GESTORBEN!")
 
-rcon = PersistentRCON(SERVER_HOST, RCON_PASSWORD, RCON_PORT)
+    def handle_kicked(reason, loggedIn):
+        global bot_ready, disconnected, kick_reason, disconnect_reason
+        bot_ready = False
+        disconnected = True
+        kick_reason = repr(reason) if reason else "(kein Grund angegeben)"
+        disconnect_reason = "kicked"
+        print(f"-> BOT WURDE GEKICKT! loggedIn={loggedIn} reason={kick_reason}")
 
-# --- BOT CREATION ---
+    def handle_end(reason):
+        global bot_ready, disconnected, disconnect_reason
+        bot_ready = False
+        disconnected = True
+        disconnect_reason = repr(reason) if reason else "(kein Grund angegeben)"
+        print(f"-> BOT VERBINDUNG BEENDET! reason={disconnect_reason}")
 
-print("Erstelle Mineflayer-Bot...")
-bot = mineflayer.createBot({
-    'host': SERVER_HOST,
-    'port': SERVER_PORT,
-    'username': 'bananagod',
-    'auth': 'offline',
-    'version': False
-})
+    def handle_error(err):
+        print(f"-> BOT-FEHLER: {repr(err) if err else '(kein Grund)'}")
 
-# --- EVENT HANDLER ---
+    bot.on("spawn", handle_spawn)
+    bot.on("death", handle_death)
+    bot.on("kicked", handle_kicked)
+    bot.on("end", handle_end)
+    bot.on("error", handle_error)
+    return bot
 
-def handle_spawn(*args):
-    global bot_ready, mcData
-    print("-> Bot ist gespannt!")
-    
-    # mcData ERST HIER laden, sobald bot.version bekannt ist!
-    if mcData is None:
-        mcData = require('minecraft-data')(bot.version)
-        print(f"-> minecraft-data geladen für Version: {bot.version}")
-        
-    rcon.send("tick freeze")
-    bot_ready = True
 
-def handle_death(*args):
-    global bot_ready
+def is_connected():
+    """Prueft ob der Bot aktuell verbunden und ready ist."""
+    global disconnected, bot_ready
+    if disconnected:
+        return False
+    if not bot_ready:
+        return False
+    try:
+        if bot is not None and not getattr(bot, "_client", None):
+            return False
+    except Exception:
+        pass
+    return True
+
+
+def get_disconnect_info():
+    """Liefert Tuempel (kick_reason, disconnect_reason) fuer Debug-Ausgabe."""
+    global kick_reason, disconnect_reason
+    return kick_reason, disconnect_reason
+
+
+def is_dead():
+    """Prueft ob der Bot gestorben ist."""
+    global dead
+    if dead:
+        return True
+    try:
+        if bot is not None and getattr(bot, "isAlive", True) is False:
+            return True
+        if bot is not None and bot.game is not None:
+            gm = bot.game.gameMode
+            if gm == "spectator" or gm == 3:
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def reconnect(host=SERVER_HOST, port=SERVER_PORT, timeout=60):
+    """Bot nach Hardcore-Tod neu verbinden."""
+    global bot, bot_ready, dead, disconnected, kick_reason, disconnect_reason
+
+    print("[BOT] Reconnecting...")
     bot_ready = False
-    print("-> BOT IST GESTORBEN!")
+    dead = False
+    disconnected = False
+    kick_reason = None
+    disconnect_reason = None
 
-bot.on('spawn', handle_spawn)
-bot.on('death', handle_death)
+    if bot is not None:
+        try:
+            bot.quit()
+        except Exception:
+            pass
+        bot = None
 
-# --- STATE EXTRACTION LOGIC ---
+    time.sleep(2)
+    create_bot(host, port)
+    return wait_for_spawn(timeout=timeout)
 
-def get_block_id(block):
-    if block is None:
-        return -1.0  # -1 signalisiert: Chunk noch nicht vom Server geladen!
-    
-    """Liest die offizielle Block-ID über minecraft-data aus."""
-    if not block or block.name == 'air' or block.name == 'cave_air':
-        return 0.0
-    
-    # Verwendet die offizielle numeric state ID aus minecraft-data
-    if mcData and block.name in mcData.blocksByName:
-        return float(mcData.blocksByName[block.name].id)
-    
-    return 1.0  # Fallback für unbekannte Blöcke
 
-def get_surrounding_blocks(radius=1, debug=False):
-    """
-    Liest ein (2*radius + 1)^3 Raster um den Bot aus (Standard: 3x3x3 = 27 Blöcke).
-    """
-    grid_size = (2 * radius + 1) ** 3
-    if not bot or not bot.entity or mcData is None:
-        return np.zeros(grid_size, dtype=np.float32)
+def wait_for_spawn(timeout=120):
+    """Warten bis Bot gespawnt ist."""
+    global bot_ready
+    print("Warte auf Bot-Spawn...")
+    start = time.time()
+    while not bot_ready and time.time() - start < timeout:
+        time.sleep(0.2)
+    if not bot_ready:
+        print(" TIMEOUT: Bot hat nicht gespawnt!")
+    return bot_ready
 
-    pos = bot.entity.position
-    base_x = int(np.floor(pos.x))
-    base_y = int(np.floor(pos.y))
-    base_z = int(np.floor(pos.z))
 
-    block_list = []
-    debug_names = []
+def is_bot_ready():
+    return bot_ready
 
-    for dy in range(-radius, radius + 1):
-        for dz in range(-radius, radius + 1):
-            for dx in range(-radius, radius + 1):
-                target_pos = Vec3(base_x + dx, base_y + dy, base_z + dz)
-                block = bot.blockAt(target_pos)
-                
-                b_id = get_block_id(block)
-                block_list.append(b_id)
-                
-                if debug:
-                    name = block.name if block else "unknown"
-                    debug_names.append(f"({dx},{dy},{dz}): {name} [ID: {b_id}]")
-
-    if debug:
-        print("--- Umgebende Blöcke ---")
-        for entry in debug_names:
-            print(entry)
-
-    return np.array(block_list, dtype=np.float32)
-
-def get_inventory_state():
-    """
-    Liest den aktuellen Inventar- & Hotbar-Status aus.
-    Gibt ein Vektor-Array für das ML-Modell zurück.
-    """
-    if not bot or not bot.inventory:
-        return np.zeros(12, dtype=np.float32)
-
-    # 1. Welches Hotbar-Item hält der Bot gerade in der Hand?
-    held_item = bot.heldItem
-    held_item_id = float(held_item.type) if held_item else 0.0
-    held_item_count = float(held_item.count) if held_item else 0.0
-
-    # 2. Aktuell ausgewählter Hotbar-Index (0 bis 8)
-    selected_slot = float(bot.quickBarSlot) if hasattr(bot, 'quickBarSlot') else 0.0
-
-    # 3. Hotbar-Belegung (Slots 36 bis 44) - wie viele Items liegen in den 9 Slots?
-    hotbar_counts = []
-    for slot_idx in range(36, 45):
-        item = bot.inventory.slots[slot_idx]
-        hotbar_counts.append(float(item.count) if item else 0.0)
-
-    # Vektor: [Held_ID, Held_Count, Selected_Slot_Idx, Hotbar_Slot_0_Count ... Hotbar_Slot_8_Count]
-    # Gesamt = 1 + 1 + 1 + 9 = 12 Features
-    inv_vector = [held_item_id, held_item_count, selected_slot] + hotbar_counts
-    return np.array(inv_vector, dtype=np.float32)
 
 def get_state():
-    """Gibt das vollständige Observation-Array (44 Features) zurück."""
-    if not bot or not bot.entity:
-        return np.zeros(5 + 27 + 12, dtype=np.float32)
-        
-    pos = bot.entity.position
-    # 1. Player Features (5 Werte)
-    player_features = [pos.x, pos.y, pos.z, bot.entity.yaw, bot.entity.pitch]
-    
-    # 2. Block Features (27 Werte)
-    block_features = get_surrounding_blocks(radius=1)
-    
-    # 3. Inventory Features (12 Werte)
-    inv_features = get_inventory_state()
-    
-    # Combined Observation: 5 + 27 + 12 = 44 Features
-    return np.concatenate([player_features, block_features, inv_features]).astype(np.float32)
+    """Gibt das vollstaendige Observation-Array zurueck.
+    Nutzt snapshot() aus env_helpers.js — ein einziger Bridge-Call (~1ms).
+    WICHTIG: Die Bridge liefert ein `Proxy`-Objekt, kein Python-list. Direktes
+    `np.array(proxy)` failt mit "invalid __array_struct__" (daher lieferte diese
+    Funktion frueher still np.zeros -- silent-zeros-Bug). Erst `list(proxy)`
+    materialisieren, dann numpy. Bei einem Fehler wird NULLEN + Kurzmeldung
+    zurueckgegeben (nicht stillschweigend nur Nullen verdrängt).
+    """
+    try:
+        if not bot or not bot.entity:
+            return np.zeros(STATE_SIZE, dtype=np.float32)
+        arr = HELPERS.snapshot(bot)
+        return np.array(list(arr), dtype=np.float32)
+    except Exception as e:
+        print(f"[STATE-ERROR] Konnte Obs nicht lesen: {type(e).__name__}: {e}")
+        return np.zeros(STATE_SIZE, dtype=np.float32)
 
-# --- TRAININGS-SCHLEIFE ---
-
-def run_training_loop():
-    global bot_ready
-    rcon.connect()
-    
-    print("Warte auf Bot-Spawn...")
-    while not bot_ready:
-        time.sleep(0.2)
-        
-    print("Bot ist bereit!")
-    
-    
-    print(get_surrounding_blocks(radius=1, debug=True))
-    
-    rcon.close()
-    print("Test-Schleife beendet.")
 
 if __name__ == "__main__":
-    run_training_loop()
+    from config import RCON_PORT, RCON_PASSWORD, SERVER_DIR, JAVA_CMD
+    from server import ServerManager
+
+    server = ServerManager(
+        server_dir=SERVER_DIR,
+        java_cmd=JAVA_CMD,
+        rcon_host=SERVER_HOST,
+        rcon_port=RCON_PORT,
+        rcon_password=RCON_PASSWORD,
+    )
+    server.start()
+    create_bot()
+    wait_for_spawn()
+
+    state = get_state()
+    print(f"\n=== STATE ({len(state)} Features) ===")
+    nonzero = np.count_nonzero(state)
+    print(f"  Non-zero features: {nonzero}/{len(state)}")
+    print(f"  First 10: {state[:10]}")
+
+    server.stop()
+    print("\nTest beendet.")

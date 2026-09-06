@@ -1,0 +1,7 @@
+stable-baselines3
+gymnasium
+torch
+tensorboard
+numpy
+mcrcon
+javascript
