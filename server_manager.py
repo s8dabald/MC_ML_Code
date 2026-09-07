@@ -158,7 +158,7 @@ class InstanceManager:
 
     # --- Intern ---
 
-    def _wait_for_server(self, timeout=90):
+    def _wait_for_server(self, timeout=300):
         print(f"[INST {self.instance_id}] Warte auf Server-Start...")
         start_time = time.time()
         while time.time() - start_time < timeout:

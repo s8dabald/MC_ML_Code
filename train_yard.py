@@ -56,10 +56,20 @@ def make_env(instance_id, debug_actions=False):
                 pass
         _atexit.register(_worker_cleanup)
 
-        # Bot verbinden
+        # Bot verbinden (mit Retry: auf Colab-Frisch-VMs kann der Erst-Boot inkl.
+        # Welt-Generierung länger dauern als ein einzelnes 60s-Fenster).
         import bot
-        bot.create_bot(SERVER_HOST, cfg["game_port"])
-        if not bot.wait_for_spawn(timeout=60):
+        spawn_ok = False
+        for attempt in range(3):
+            if attempt == 0:
+                bot.create_bot(SERVER_HOST, cfg["game_port"])
+                spawn_ok = bot.wait_for_spawn(timeout=120)
+            else:
+                print(f"[ENV {instance_id}] Bot-Spawn Versuch {attempt + 1} fehlgeschlagen, reconnect...")
+                spawn_ok = bot.reconnect(SERVER_HOST, cfg["game_port"], timeout=120)
+            if spawn_ok:
+                break
+        if not spawn_ok:
             print(f"[ENV {instance_id}] Bot konnte nicht spawnen!")
             raise RuntimeError(f"Bot spawn fehlgeschlagen auf Instanz {instance_id}")
 
