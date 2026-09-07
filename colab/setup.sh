@@ -27,15 +27,16 @@ else
 fi
 java -version 2>&1 | head -1
 
-# --- Node 20 via nvm (Colab-apt hat nur Node 12 -> zu alt fuer mineflayer) ---
+# --- Node 22 LTS via nvm (Colab-apt hat nur Node 12 -> zu alt fuer mineflayer;
+# mineflayer>=4.39 verlangt node>=22 -> nicht Node 20 verwenden) ---
 export NVM_DIR="$HOME/.nvm"
 if [ ! -s "$NVM_DIR/nvm.sh" ]; then
   echo "Installiere nvm..."
   curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash
 fi
 . "$NVM_DIR/nvm.sh"
-nvm install 20 >/dev/null 2>&1 || true
-nvm use 20 >/dev/null 2>&1 || true
+nvm install 22 >/dev/null 2>&1 || true
+nvm use 22 >/dev/null 2>&1 || true
 # Node/npm systemweit verfuegbar machen (jede colab-exec-Shell hat sonst frisches PATH).
 NODE_BIN_DIR="$(dirname "$(command -v node)")"
 ln -sf "$NODE_BIN_DIR/node" /usr/local/bin/node
