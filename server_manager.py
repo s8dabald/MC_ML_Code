@@ -32,22 +32,32 @@ class InstanceManager:
         self.java_cmd = java_cmd
         self.process = None
         self.mcr = None
+        self.log_file = None
 
     def start(self):
         """Server-Instanz starten."""
         self.prepare()
+        self._check_java()
         print(f"[INST {self.instance_id}] Starte Server auf Port {self.game_port}...")
+        # Server-Output nicht schlucken: laeuft in <instanz>/server.log, damit
+        # Boot-Fehler (z.B. Paperclip-Netzwerk, Java-Probleme) sichtbar werden.
+        log_path = os.path.join(self.server_dir, "server.log")
+        self.log_file = open(log_path, "a")
         self.process = subprocess.Popen(
             self.java_cmd,
             cwd=self.server_dir,
             shell=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdout=self.log_file,
+            stderr=subprocess.STDOUT,
         )
-        self._wait_for_server(timeout=90)
+        ready = self._wait_for_server(timeout=300)
         self._connect_rcon()
         self._set_difficulty_hard()
-        print(f"[INST {self.instance_id}] Server laeuft (RCON {self.rcon_port}).")
+        if ready:
+            print(f"[INST {self.instance_id}] Server laeuft (RCON {self.rcon_port}).")
+        else:
+            print(f"[INST {self.instance_id}] WARNUNG: RCON in 300s nicht bereit. "
+                  f"Boot-Log: {log_path} — Bot-Retry greift trotzdem.")
 
     def prepare(self):
         """Instanz-Verzeichnis vorbereiten: leer anlegen (falls neu), paper.jar und
@@ -81,6 +91,17 @@ class InstanceManager:
 
         # server.properties frisch erzeugen (eigene Ports / Passwort)
         self._write_server_properties()
+
+        # Paperclip-Offline-Bootstrap: versions/ + cache/ aus der Vorlage uebernehmen.
+        # Lokal bereits materialisiert; auf Colab wird die Vorlage (SERVER_DIR) im
+        # Setup per Google Drive geseedet. Damit bootet Paperclip ohne Netzwerk-/
+        # Mojang-Download (sonst haengt der Erststart auf Colab ueber Minuten).
+        for sub in ("versions", "cache"):
+            src_dir = os.path.join(TEMPLATE_DIR, sub)
+            dst_dir = os.path.join(self.server_dir, sub)
+            if os.path.isdir(src_dir) and not os.path.exists(dst_dir):
+                shutil.copytree(src_dir, dst_dir)
+                print(f"[INST {self.instance_id}] {sub}/ aus Vorlage uebernommen.")
 
     def _write_server_properties(self):
         """server.properties mit dieser Instanz' Ports erzeugen. Fehlende Felder
@@ -130,6 +151,12 @@ class InstanceManager:
                 self.process.wait()
         self._disconnect_rcon()
         self.process = None
+        if self.log_file is not None:
+            try:
+                self.log_file.close()
+            except Exception:
+                pass
+            self.log_file = None
         print(f"[INST {self.instance_id}] Server gestoppt.")
 
     def reset_world(self):
@@ -157,6 +184,22 @@ class InstanceManager:
         return self._send_rcon(command)
 
     # --- Intern ---
+
+    def _check_java(self):
+        """java im PATH erzwingen und Version ausgeben — bevor der Prozess startet."""
+        java = shutil.which("java")
+        if java is None:
+            raise RuntimeError(
+                f"[INST {self.instance_id}] 'java' nicht im PATH gefunden — "
+                f"colab/setup.sh muss Java 21 installieren."
+            )
+        try:
+            out = subprocess.run([java, "-version"], capture_output=True,
+                                 text=True, timeout=10)
+            first = (out.stderr or out.stdout).strip().splitlines()[0]
+        except Exception:
+            first = "java"
+        print(f"[INST {self.instance_id}] Java: {first}")
 
     def _wait_for_server(self, timeout=300):
         print(f"[INST {self.instance_id}] Warte auf Server-Start...")

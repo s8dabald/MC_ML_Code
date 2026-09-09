@@ -1,12 +1,14 @@
 #!/bin/bash
-# Colab-Setup: Idempotent. Java 21, Node 20 (nvm), Python-Deps, Server-Assets,
-# JS-Bridge-Warmup. Laueft im Colab-VM als root (kein sudo noetig).
-# Eingebunden aus colab/colab_train.sh; alternativ manuell:
+# Colab-Setup: Idempotent. Java 21, Node 22 (nvm), Python-Deps, Server-Assets,
+# Paperclip-Offline-Cache (Drive), JS-Bridge-Warmup. Laueft im Colab-VM als root
+# (kein sudo noetig). Eingebunden aus colab/colab_train.sh; alternativ manuell:
 #   echo '!bash /content/MC_ML_Code/colab/setup.sh' | colab exec -s <session>
 set -e
 
 REPO_DIR="/content/MC_ML_Code"
 SERVER_DIR="/content/mcml/Server"
+DRIVE_ROOT="/content/drive/MyDrive/MC_ML"
+DRIVE_CACHE="$DRIVE_ROOT/server_cache"
 
 echo "=== [SETUP] Start ==="
 
@@ -60,6 +62,47 @@ mkdir -p "$SERVER_DIR"
 cp -n "$REPO_DIR/server_assets/paper.jar" "$SERVER_DIR/paper.jar" || true
 cp -n "$REPO_DIR/server_assets/eula.txt" "$SERVER_DIR/eula.txt" || true
 ls -la "$SERVER_DIR" | grep -E "paper.jar|eula.txt" || exit 1
+
+# --- Paperclip-Offline-Cache von Google Drive ---
+# Fehlt mojang_26.1.2.jar, versucht Paperclip beim 1. Boot die Server-Jar von
+# Mojang herunterzuladen -> haengt/stallt auf Colab. Der Cache wird per find im
+# gesamten gemounteten Drive gesucht — egal wo abgelegt (empfohlen
+# MyDrive/MC_ML/server_cache/, funktioniert auch direkt irgendwo unter MyDrive).
+echo "Suche Paperclip-Bootstrap-Cache auf Google Drive..."
+HAS_CACHE=0
+if [ -d /content/drive ]; then
+  CACHE_JAR=""
+  if [ -f "$DRIVE_CACHE/cache/mojang_26.1.2.jar" ]; then
+    CACHE_JAR="$DRIVE_CACHE/cache/mojang_26.1.2.jar"
+  fi
+  if [ -z "$CACHE_JAR" ]; then
+    CACHE_JAR="$(find /content/drive -maxdepth 6 -type f -name 'mojang_26.1.2.jar' 2>/dev/null | head -1)"
+  fi
+  if [ -n "$CACHE_JAR" ]; then
+    mkdir -p "$SERVER_DIR/cache"
+    cp -f "$CACHE_JAR" "$SERVER_DIR/cache/mojang_26.1.2.jar"
+    echo "OK: cache/mojang_26.1.2.jar von $CACHE_JAR -> $SERVER_DIR/cache/"
+    HAS_CACHE=1
+  fi
+
+  # Optional versions/-Mirror (offline-materialisierte Server-Jar) irgendwo auf Drive
+  if [ ! -d "$SERVER_DIR/versions" ]; then
+    VER_DIR_SRC="$(find /content/drive -maxdepth 7 -type d -path '*/versions/26.1.2' 2>/dev/null | head -1)"
+    if [ -n "$VER_DIR_SRC" ]; then
+      mkdir -p "$SERVER_DIR/versions"
+      cp -rn "$VER_DIR_SRC/." "$SERVER_DIR/versions/"
+      echo "OK: versions/-Mirror von $VER_DIR_SRC -> $SERVER_DIR/versions/"
+      HAS_CACHE=1
+    fi
+  fi
+fi
+if [ "$HAS_CACHE" = "0" ]; then
+  echo "WARNUNG: Kein mojang_26.1.2.jar auf Google Drive gefunden!"
+  echo "         -> Paperclip wird die Server-Jar von Mojang laden (kann auf Colab"
+  echo "            fehlschlagen/laengere Erstboot-Zeit). Fix: die Datei aus"
+  echo "            Server/cache/ irgendwo unter MyDrive ablegen."
+fi
+ls -la "$SERVER_DIR" 2>/dev/null | grep -E "cache|versions" || echo "(keine Bootstrap-Caches materialisiert)"
 
 # --- JS-Bridge-Warmup: npm-Module EINMAL installieren, BEVOR SubprocVecEnv fork-t ---
 # (Sonst installieren 3 Worker gleichzeitig in dasselbe node_modules -> Race/Corruption).
